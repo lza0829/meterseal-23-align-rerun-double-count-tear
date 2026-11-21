@@ -1,5 +1,3 @@
-from app.db import connect
-from app.services import batch_rollup
 """全局唯一时钟口径。
 
 架构决策（全局只贯彻这一种）：以**装载钟 loaded_at** 截止为准。
@@ -63,11 +61,3 @@ def assert_clock_supported(clock: str | None) -> None:
             400,
             f"本系统全局按装载钟 {CLOCK} 截止，{clock} 仅审计用，不得作为对齐/封印钟",
         )
-
-
-def rollup_hint(period_id: str | None = None) -> int:
-    conn = connect()
-    try:
-        return batch_rollup.pending_across_open(conn, period_id)
-    finally:
-        conn.close()

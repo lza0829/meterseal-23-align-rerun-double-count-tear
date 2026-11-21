@@ -126,6 +126,6 @@ def periods():
 def rollup(period_id: str):
     conn = connect()
     try:
-        return batch_rollup.double_count_report(conn, period_id)
+        return batch_rollup.rollup_report(conn, period_id)
     finally:
         conn.close()

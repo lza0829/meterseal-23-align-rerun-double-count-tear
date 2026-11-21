@@ -19,9 +19,9 @@ onMounted(async () => {
       <div class="stat">开放账期<b>{{ data.open_periods }}</b></div>
       <div class="stat">已封印账期<b>{{ data.sealed_periods }}</b></div>
       <div class="stat">表具数<b>{{ data.meter_count }}</b></div>
-      <div class="stat">未决差额<b>{{ data.pending_variances }}</b></div>
-      <div class="stat">批累计未决<b>{{ data.pending_variances }}</b></div>
+      <div class="stat">现行未决差额<b>{{ data.pending_variances }}</b></div>
     </div>
+    <p class="sub" v-if="data">未决只数现行批（开放批）的 pending 差额；已被取代（superseded）批仅留痕，不再计数，禁止多批加总</p>
     <p class="sub" v-if="data">发生钟 {{ data.audit_only_clock }} 仅作审计，不参与任何截止/落封</p>
     <div class="panel" v-if="data">
       <h3>最近对账批</h3>

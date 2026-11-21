@@ -1,6 +1,6 @@
 from __future__ import annotations
 import sqlite3
-from app.config import DATA_DIR, DB_PATH
+from app.config import DATA_DIR, DB_PATH, SQLITE_SYNCHRONOUS
 
 
 def connect() -> sqlite3.Connection:
@@ -11,5 +11,9 @@ def connect() -> sqlite3.Connection:
     # WAL：读写不互斥到文件锁级别；配合 busy_timeout，
     # 对齐 BEGIN IMMEDIATE 持锁期间的并发装载排队等待，而非直接失败
     conn.execute("PRAGMA journal_mode=WAL")
+    if SQLITE_SYNCHRONOUS in ("OFF", "NORMAL", "FULL", "EXTRA"):
+        conn.execute(f"PRAGMA synchronous={SQLITE_SYNCHRONOUS}")
+    else:
+        conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA busy_timeout=10000")
     return conn

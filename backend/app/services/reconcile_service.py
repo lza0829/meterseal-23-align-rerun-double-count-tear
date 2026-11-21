@@ -1,7 +1,6 @@
-from app.services import batch_rollup
-"""对齐与封印：全局唯一按装载钟 loaded_at 截止。
+"""对齐与封印：全局唯一按装载钟 loaded_at 截止；重跑贯彻**命运架构**。
 
-不变量：
+钟口径不变量：
 1. 预览（align）与落封（seal）必须是同一只钟、同一个 as_of；
    批次行固化 clock/as_of，封印只认批次固化值，拒绝请求方另传一套。
 2. 闭包 = estimates.loaded_at <= as_of ∪ actuals.loaded_at <= as_of；
@@ -10,6 +9,17 @@ from app.services import batch_rollup
    封印前用同一 as_of 重算并比对，闭包漂移即拒封。
 4. 全程 IMMEDIATE 事务：并发装载与对齐拿到的是某个串行化时刻的前缀，
    不会出现半截混钟。
+
+重跑（命运架构，全局唯一）不变量：
+5. 重跑先整体交接旧现行批（批置 superseded、差额打 superseded_at 痕迹），
+   再写新批；同键禁止两条现行差额（部分唯一索引硬保证）。
+6. 已处置键（fate != pending）命运不被重跑吞掉：新批不再为其生成 pending
+   差额，旧行留痕；新批只能收仍未决的现行键。
+7. 快照键集合 = 闭包键集合；正式现行差额键集合 = 快照键 − 匹配键 − 已决键，
+   已决键的处置痕迹可从历史批追溯，键集合对得上、不撒谎。
+8. 总览未决 = 现行 pending 键集合大小 = 现行批 pending 数；superseded 批
+   不再驱动任何未决计数，禁止多批加总。
+9. 对齐与处置抢跑/崩溃一律整笔回滚：不留半截批、不留双现行 open。
 """
 from __future__ import annotations
 import hashlib
@@ -18,6 +28,7 @@ import uuid
 from fastapi import HTTPException
 
 from app.db import connect
+from app.services import batch_rollup
 from app.services.clock import CLOCK, now_iso, parse_as_of, assert_clock_supported
 
 
@@ -26,6 +37,12 @@ def _safe_rollback(conn) -> None:
         conn.rollback()
     except Exception:
         pass
+
+
+def _align_crash_point() -> None:
+    """测试缝：默认空操作。并发/半截回滚测试可 monkeypatch 成抛错，
+    模拟对齐在新批写入后、提交前崩溃，验证整笔事务回滚不留半截。"""
+    return None
 
 
 def _closure(conn, period_id: str, as_of_iso: str) -> dict[str, dict]:
@@ -88,14 +105,21 @@ def _fingerprint(period_id: str, as_of_iso: str, closure: dict[str, dict]) -> st
 
 
 def run_align(period_id: str, as_of: str | None, clock: str | None = None) -> dict:
-    """as-of 预览对齐：只纳入 loaded_at <= as_of 的正式行。"""
+    """as-of 对齐（支持重跑）：只纳入 loaded_at <= as_of 的正式行。
+
+    命运架构重跑顺序（同一 IMMEDIATE 事务，任一步失败整笔回滚）：
+    1. 查同键现行差额：已决键（fate != pending）命运保留，新批不再生成其差额；
+    2. 旧 open 批整体置 superseded、其差额打 superseded_at 痕迹；
+    3. 写入新批快照（闭包全集）与仅含未决键的新现行差额。
+    """
     assert_clock_supported(clock)
     as_of_dt = parse_as_of(as_of)
     as_of_iso = as_of_dt.isoformat()
 
     conn = connect()
     try:
-        # IMMEDIATE：立刻拿写锁，对齐期间任何装载写入排队，闭包是一致前缀
+        # IMMEDIATE：立刻拿写锁，对齐期间任何装载/处置/另一路对齐排队，
+        # 闭包与交接动作是同一个串行化时刻，不存在半截混钟、双现行批
         conn.execute("BEGIN IMMEDIATE")
         # 封印状态检查置于事务内：消除"检查后、持锁前被封印"的竞态
         period = conn.execute(
@@ -112,11 +136,31 @@ def run_align(period_id: str, as_of: str | None, clock: str | None = None) -> di
             conn.execute("ROLLBACK")
             raise HTTPException(400, f"截至 {as_of_iso} 该账期无已装载估抄/实抄可对齐")
 
-        _ = period_id
+        # 重跑前的现行差额视图（superseded_at IS NULL）：每键至多一条，
+        # 部分唯一索引 ux_variances_live 硬保证；兜底取 rowid 最新一条。
+        live_rows = conn.execute(
+            """SELECT v.variance_id, v.meter_id, v.fate, v.batch_id
+               FROM variances v
+               JOIN (
+                 SELECT meter_id, MAX(rowid) AS max_rowid FROM variances
+                 WHERE period_id=? AND superseded_at IS NULL
+                 GROUP BY meter_id
+               ) latest ON latest.max_rowid = v.rowid
+               WHERE v.period_id=? AND v.superseded_at IS NULL""",
+            (period_id, period_id),
+        ).fetchall()
+        live_by_meter = {r["meter_id"]: r for r in live_rows}
+        decided = {mid: r for mid, r in live_by_meter.items() if r["fate"] != "pending"}
+
+        # 交接旧现行批：先打差额痕迹，再置批 superseded。
+        # 不先交接就插新行会撞 ux_variances_live，撞键即报错回滚，绝不双现行。
+        stamp = now_iso()
+        handoff = batch_rollup.supersede_live(conn, period_id, stamp)
 
         batch_id = "B-" + uuid.uuid4().hex[:10]
         snapshot_id = "S-" + uuid.uuid4().hex[:10]
         matched = 0
+        new_variance_keys: list[str] = []
         variances = []
         snapshot_rows = []
         for mid, c in closure.items():
@@ -138,7 +182,12 @@ def run_align(period_id: str, as_of: str | None, clock: str | None = None) -> di
             if eq is not None and aq is not None and abs(eq - aq) < 1e-9:
                 matched += 1
                 continue
+            # 命运架构：已决键不得被重跑重新变未决。旧行已随旧批留痕，
+            # 新批不插该键，处置命运仍可从痕迹行追溯。
+            if mid in decided:
+                continue
             delta = (aq if aq is not None else 0.0) - (eq if eq is not None else 0.0)
+            new_variance_keys.append(mid)
             variances.append(
                 (
                     "V-" + uuid.uuid4().hex[:10],
@@ -178,7 +227,11 @@ def run_align(period_id: str, as_of: str | None, clock: str | None = None) -> di
                    VALUES (?,?,?,?,?,?,?,?)""",
                 variances,
             )
-        batch_rollup.mark_soft_supersede(conn, period_id)
+
+        # 测试缝：模拟提交前崩溃/抢跑失败。异常走外层回滚，
+        # 上面所有交接与新批写入必须全部消失，库回到重跑前状态。
+        _align_crash_point()
+
         conn.commit()
         return {
             "batch_id": batch_id,
@@ -187,10 +240,16 @@ def run_align(period_id: str, as_of: str | None, clock: str | None = None) -> di
             "as_of": as_of_iso,
             "cutoff_at": cutoff,
             "matched_count": matched,
+            # 本批持有的现行未决键数（已决键不计）
             "variance_count": len(variances),
-            "fingerprint": fingerprint,
             "snapshot_rows": len(snapshot_rows),
+            "fingerprint": fingerprint,
             "status": "open",
+            # 重跑交接与命运保留的审计口径，便于核对键集合不撒谎
+            "superseded_batches": handoff["superseded_batches"],
+            "stamped_variances": handoff["stamped_variances"],
+            "decided_kept": sorted(decided),
+            "new_pending_keys": sorted(new_variance_keys),
         }
     except HTTPException:
         raise
@@ -281,7 +340,8 @@ def seal_period(
             raise HTTPException(409, "批次缺少闭包快照，无法回溯，禁止封印")
 
         pending = conn.execute(
-            "SELECT COUNT(*) AS c FROM variances WHERE batch_id=? AND fate='pending'",
+            "SELECT COUNT(*) AS c FROM variances "
+            "WHERE batch_id=? AND fate='pending' AND superseded_at IS NULL",
             (batch_id,),
         ).fetchone()["c"]
         sealed_at = now_iso()
@@ -324,17 +384,33 @@ def set_fate(variance_id: str, fate: str) -> dict:
         raise HTTPException(400, "非法命运")
     conn = connect()
     try:
+        # 与对齐互斥：IMMEDIATE 锁内复查，杜绝处置与重跑抢跑产生半截状态
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT v.*, p.status AS period_status FROM variances v "
             "JOIN periods p ON p.period_id=v.period_id WHERE v.variance_id=?",
             (variance_id,),
         ).fetchone()
         if not row:
+            conn.execute("ROLLBACK")
             raise HTTPException(404, "差额不存在")
         if row["period_status"] == "sealed":
+            conn.execute("ROLLBACK")
             raise HTTPException(409, "账期已封印，禁止改命运")
+        # 已被重跑取代的痕迹行：命运以取代它时的留痕为准，禁止再改，
+        # 否则同键会出现"旧痕迹被翻案、新现行另有命运"两套真
+        if row["superseded_at"] is not None:
+            conn.execute("ROLLBACK")
+            raise HTTPException(
+                409, "该差额已被后续对齐批取代，其处置命运以留痕为准，禁止修改"
+            )
         conn.execute("UPDATE variances SET fate=? WHERE variance_id=?", (fate, variance_id))
         conn.commit()
         return {"variance_id": variance_id, "fate": fate}
+    except HTTPException:
+        raise
+    except Exception:
+        _safe_rollback(conn)
+        raise
     finally:
         conn.close()

@@ -205,6 +205,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 0.8rem;
 }
 .tag.sealed, .tag.已封印 { background: rgba(168, 90, 42, 0.18); color: #7a3e12; }
+.tag.superseded, .tag.已被取代 { background: rgba(120, 120, 120, 0.18); color: #555; }
+.tag.expired, .tag.已作废 { background: rgba(120, 120, 120, 0.12); color: #666; }
 
 @media (max-width: 720px) {
   .mast { grid-template-columns: 1fr; }

@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
-import { 账期状态, 标 } from '../labels'
+import { 账期状态, 批状态, 标 } from '../labels'
 const periods = ref([])
 const periodId = ref('2026-10')
 const batches = ref([])
@@ -45,7 +45,7 @@ onMounted(refresh)
     </div>
     <p class="panel" v-if="current()">
       本批钟口径 <b>{{ current().clock }}</b> · 固化 as_of <b>{{ current().as_of }}</b>
-      · 状态 <span class="tag" :class="current().status">{{ 标(账期状态, current().status) }}</span>
+      · 状态 <span class="tag" :class="current().status">{{ 标(批状态, current().status) }}</span>
     </p>
     <p class="msg ok" v-if="msg">{{ msg }}</p>
     <p class="msg err" v-if="err">{{ err }}</p>
